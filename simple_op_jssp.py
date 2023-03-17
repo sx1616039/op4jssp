@@ -5,7 +5,7 @@ import random
 
 
 class JobEnv:
-    def __init__(self, case_name, path='../all_data_set/', no_op=False):
+    def __init__(self, case_name, path='../all_data_set/'):
         self.case_name = case_name
         file = path + case_name + ".txt"
         with open(file, 'r') as f:
@@ -15,17 +15,14 @@ class JobEnv:
             data = f.read()
             data = str(data).replace('\n', '\t')
             data = str(data).split('\t')
-            if data.__contains__(""):
+            while data.__contains__(""):
                 data.remove("")
             job = list(map(int, data))
             self.job = np.array(job).reshape(self.m_n[0], self.m_n[1] * 2)
 
         self.job_num = self.m_n[0]
         self.machine_num = self.m_n[1]
-        if no_op:
-            self.action_num = self.job_num+1
-        else:
-            self.action_num = self.job_num
+        self.action_num = self.job_num
 
         self.current_time = 0  # current time
         self.finished_jobs = None
@@ -35,7 +32,7 @@ class JobEnv:
         self.current_op_of_job = None
         self.assignable_job = None
         # state features are above 4 variables
-        self.state_num = self.machine_num * 2 + self.job_num + self.action_num
+        self.state_num = self.machine_num * 2 + self.job_num * 2
         self.result_dict = {}
         self.state = None
 
@@ -57,6 +54,7 @@ class JobEnv:
         self.done = False
         self.reward = 0
         self.no_op_cnt = 0
+        self.mask = None
 
     def reset(self):
         self.current_time = 0  # current time
@@ -67,11 +65,12 @@ class JobEnv:
         self.finished_jobs = np.zeros(self.job_num, dtype=bool)
 
         self.last_release_time = np.repeat(0, self.job_num)
+        self.mask = np.zeros(self.action_num, dtype=int)
         self.state = []
         self.result_dict = {}
         self.done = False
         self.no_op_cnt = 0
-        return self._get_state()
+        return self._get_state(), self.mask
 
     def _get_state(self):
         self.state = []
@@ -94,7 +93,7 @@ class JobEnv:
 
         if self.stop():
             self.done = True
-        return self._get_state(), self.reward/self.max_op_len, self.done
+        return self._get_state(), self.reward/self.max_op_len, self.done, self.mask
 
     def allocate_job(self, job_id):
         stage = self.current_op_of_job[job_id]
@@ -102,17 +101,19 @@ class JobEnv:
         process_time = self.job[job_id][stage * 2 + 1]
 
         self.job_on_machine[machine_id] = job_id
-        start_time = self.next_time_on_machine[machine_id]
+        # start_time = self.next_time_on_machine[machine_id]
         self.next_time_on_machine[machine_id] += process_time
-        end_time = start_time + process_time
-        self.result_dict[job_id + 1, machine_id + 1] = start_time, end_time, process_time
+        # end_time = start_time + process_time
+        # self.result_dict[job_id + 1, machine_id + 1] = start_time, end_time, process_time
 
         self.last_release_time[job_id] = self.current_time
         self.assignable_job[job_id] = False
+        self.mask[job_id] = -1e8
         # assignable jobs whose current machine are employed will not be assignable
         for x in range(self.job_num):
             if self.assignable_job[x] and self.job[x][self.current_op_of_job[x] * 2] == machine_id:
                 self.assignable_job[x] = False
+                self.mask[x] = -1e8
         # there is no assignable jobs after assigned a job and time advance is needed
         self.reward += process_time
         while sum(self.assignable_job) == 0 and not self.stop():
@@ -121,7 +122,11 @@ class JobEnv:
 
     def time_advance(self):
         hole_len = 0
-        self.current_time = self.find_second_min()
+        min_next_time = min(self.next_time_on_machine)
+        if self.current_time < min_next_time:
+            self.current_time = min_next_time
+        else:
+            self.current_time = self.find_second_min()
         for machine in range(self.machine_num):
             dist_need_to_advance = self.current_time - self.next_time_on_machine[machine]
             if dist_need_to_advance > 0:
@@ -138,14 +143,17 @@ class JobEnv:
                 for x in range(self.job_num):  # release jobs on this machine
                     if not self.finished_jobs[x] and self.job[x][self.current_op_of_job[x] * 2] == k:
                         self.assignable_job[x] = True
+                        self.mask[x] = 0
                 self.current_op_of_job[cur_job_id] += 1
                 if self.current_op_of_job[cur_job_id] >= self.machine_num:
                     self.finished_jobs[cur_job_id] = True
                     self.assignable_job[cur_job_id] = False
+                    self.mask[cur_job_id] = -1e8
                 else:
                     next_machine = self.job[cur_job_id][self.current_op_of_job[cur_job_id] * 2]
                     if self.job_on_machine[next_machine] >= 0:  # 如果下一工序的机器被占用，则作业不可分配
                         self.assignable_job[cur_job_id] = False
+                        self.mask[cur_job_id] = -1e8
 
     def stop(self):
         if sum(self.current_op_of_job) < self.machine_num * self.job_num:
